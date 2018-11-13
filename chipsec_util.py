@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #CHIPSEC: Platform Security Assessment Framework
-#Copyright (c) 2010-2016, Intel Corporation
+#Copyright (c) 2010-2018, Intel Corporation
 # 
 #This program is free software; you can redistribute it and/or
 #modify it under the terms of the GNU General Public License
@@ -36,12 +36,9 @@ import getopt
 from chipsec import defines
 from chipsec.logger  import logger
 from chipsec.chipset import UnknownChipsetError
+from chipsec.testcase import ExitCode
 
 logger().UTIL_TRACE = True
-
-class ExitCode:
-    OK = 0
-    EXCEPTION = 32
 
 #CMD_OPTS_WIDTH = [ 'byte', 'word', 'dword', 'qword' ]
 CMD_OPTS_WIDTH = [ 'byte', 'word', 'dword' ]
@@ -70,6 +67,7 @@ class ChipsecUtil:
         self.CHIPSEC_LOADED_AS_EXE = True if (hasattr(sys, "frozen") or hasattr(sys, "importers")) else False
 
         self._platform       = None
+        self._pch            = None
         self._unkownPlatform = True
         self._no_driver      = False
 
@@ -90,6 +88,7 @@ class ChipsecUtil:
         Shows the list of available command line extensions
         """
         from chipsec.chipset import Chipset_Code
+        from chipsec.chipset import pch_codes
         logger().log("\nUsage:"
                      "\n\nchipsec_util.py [options] <command>"
                      "\n\nOptions:"
@@ -97,9 +96,11 @@ class ChipsecUtil:
                      "\n-d --debug            show debug output"
                      "\n-l --log              output to log file"
                      "\n-p --platform         platform code. Should be among the supported platforms:"
-                     "\n                      %s"
+                     "\n                      {}"
+                     "\n   --pch              PCH code. Should be among the supported PCH:"
+                     "\n                      {}"
                      "\n-n --no_driver        don't load chipsec kernel module"
-                     "\n-i --ignore_platform  run chipsec even if the platform is not recognized"  % Chipset_Code.keys())
+                     "\n-i --ignore_platform  run chipsec even if the platform is not recognized".format(Chipset_Code.keys(), pch_codes.keys()))
         logger().log("\nAll numeric values are in hex. <width> can be one of {1, byte, 2, word, 4, dword}")
 
         if command is None or command not in self.commands:
@@ -127,7 +128,7 @@ class ChipsecUtil:
     def parse_args(self):
         import getopt
         try:
-            opts, args = getopt.getopt(self.argv, "ip:h:vdnl:", ["ignore_platform", "platform=", "help=", "verbose", "debug", "no_driver", "log="])
+            opts, args = getopt.getopt(self.argv, "ip:h:vdnl:", ["ignore_platform", "platform=", "help=", "verbose", "debug", "no_driver", "log=", "pch="])
         except getopt.GetoptError, err:
             logger().error(str(err))
             self.chipsec_util_help()
@@ -145,6 +146,8 @@ class ChipsecUtil:
                 self.help_cmd  = a
             elif o in ("-p", "--platform"):
                 self._platform = a.upper()
+            elif o in ("--pch"):
+                self._pch = a.upper()
             elif o in ("-i", "--ignore_platform"):
                 self._unkownPlatform = False
                 logger().log( "[*] Ignoring unsupported platform warning and continue execution" )
@@ -210,7 +213,7 @@ class ChipsecUtil:
             comm = self.commands[cmd](self.argv, cs = self._cs)
 
             try:
-                self._cs.init( self._platform, comm.requires_driver() and not self._no_driver)
+                self._cs.init( self._platform, self._pch, comm.requires_driver() and not self._no_driver)
             except UnknownChipsetError, msg:
                 logger().warn("*******************************************************************")
                 logger().warn("* Unknown platform!")

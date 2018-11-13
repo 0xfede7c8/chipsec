@@ -1,7 +1,7 @@
 #!/usr/bin/python
 #CHIPSEC: Platform Security Assessment Framework
-#Copyright (c) 2010-2016, Intel Corporation
-# 
+#Copyright (c) 2010-2018, Intel Corporation
+#
 #This program is free software; you can redistribute it and/or
 #modify it under the terms of the GNU General Public License
 #as published by the Free Software Foundation; Version 2.
@@ -24,7 +24,7 @@
 # -------------------------------------------------------------------------------
 #
 # CHIPSEC: Platform Hardware Security Assessment Framework
-# (c) 2010-2012 Intel Corporation
+# (c) 2010-2018 Intel Corporation
 #
 # -------------------------------------------------------------------------------
 
@@ -35,7 +35,9 @@ usage:
     >>> read_spi( spi_fla, length )
     >>> write_spi( spi_fla, buf )
     >>> erase_spi_block( spi_fla )
-    
+    >>> get_SPI_JEDEC_ID()
+    >>> get_SPI_JEDEC_ID_decoded()
+
 .. note::
     !! IMPORTANT:
     Size of the data chunk used in SPI read cycle (in bytes)
@@ -59,6 +61,7 @@ from chipsec.file import *
 from chipsec.cfg.common import *
 from chipsec.hal import hal_base, mmio
 from chipsec.helper import oshelper
+from chipsec.hal.spi_jedec_ids import *
 
 SPI_READ_WRITE_MAX_DBC = 64
 SPI_READ_WRITE_DEF_DBC = 4
@@ -68,9 +71,10 @@ SPI_FLA_SHIFT     = 12
 SPI_FLA_PAGE_MASK = chipsec.defines.ALIGNED_4KB
 
 # agregated SPI Flash commands
-HSFCTL_READ_CYCLE = ( (Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_READ<<1) | Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_FGO)
+HSFCTL_READ_CYCLE  = ( (Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_READ<<1) | Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_FGO)
 HSFCTL_WRITE_CYCLE = ( (Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_WRITE<<1) | Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_FGO)
 HSFCTL_ERASE_CYCLE = ( (Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_ERASE<<1) | Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_FGO)
+HSFCTL_JEDEC_CYCLE = ( (Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_JEDEC<<1) | Cfg.PCH_RCBA_SPI_HSFCTL_FCYCLE_FGO)
 
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 # FGO bit cleared (for safety ;)
@@ -92,8 +96,7 @@ SPI_HSFSTS_FDOPSS_MASK  = (1 << 13)
 # Flash Regions
 #
 
-SPI_REGION_NUMBER       = 9
-SPI_REGION_NUMBER_IN_FD = 9
+SPI_REGION_NUMBER_IN_FD = 12
 
 FLASH_DESCRIPTOR    = 0
 BIOS                = 1
@@ -104,6 +107,9 @@ FREG5               = 5
 FREG6               = 6
 FREG7               = 7
 EMBEDDED_CONTROLLER = 8
+FREG9               = 9
+FREG10              = 10
+FREG11              = 11
 
 SPI_REGION = {
  FLASH_DESCRIPTOR   : 'FREG0_FLASHD',
@@ -112,7 +118,12 @@ SPI_REGION = {
  GBE                : 'FREG3_GBE',
  PLATFORM_DATA      : 'FREG4_PD',
  FREG5              : 'FREG5',
- FREG6              : 'FREG6'
+ FREG6              : 'FREG6',
+ FREG7              : 'FREG7',
+ EMBEDDED_CONTROLLER: 'FREG8_EC',
+ FREG9              : 'FREG9',
+ FREG10             : 'FREG10',
+ FREG11             : 'FREG11'
 }
 
 SPI_REGION_NAMES = {
@@ -124,14 +135,15 @@ SPI_REGION_NAMES = {
  FREG5              : 'Flash Region 5',
  FREG6              : 'Flash Region 6',
  FREG7              : 'Flash Region 7',
- EMBEDDED_CONTROLLER: 'Embedded Controller'
+ EMBEDDED_CONTROLLER: 'Embedded Controller',
+ FREG9              : 'Flash Region 9',
+ FREG10             : 'Flash Region 10',
+ FREG11             : 'Flash Region 11'
 }
 
 #
 # Flash Descriptor Master Defines
 #
-
-SPI_MASTER_NUMBER_IN_FD = 4
 
 MASTER_HOST_CPU_BIOS    = 0
 MASTER_ME               = 1
@@ -210,6 +222,8 @@ class SPI(hal_base.HALBase):
 
     def get_SPI_region( self, spi_region_id ):
         freg_name = SPI_REGION[ spi_region_id ]
+        if not self.cs.is_register_defined(freg_name):
+            return (None, None, None)
         freg = self.cs.read_register(freg_name)
         # Region Base corresponds to FLA bits 24:12
         range_base  = self.cs.get_register_field(freg_name, freg, 'RB' ) << SPI_FLA_SHIFT
@@ -221,13 +235,15 @@ class SPI(hal_base.HALBase):
 
     # all_regions = True : return all SPI regions
     # all_regions = False: return only available SPI regions (limit >= base)
-    def get_SPI_regions( self, all_regions ):
+    def get_SPI_regions( self, all_regions=True):
         spi_regions = {}
         for r in SPI_REGION:
             (range_base, range_limit, freg) = self.get_SPI_region( r )
+            if range_base is None:
+                continue
             if all_regions or (range_limit >= range_base):
                 range_size = range_limit - range_base + 1
-                spi_regions[r] = (range_base, range_limit, range_size, SPI_REGION_NAMES[r])
+                spi_regions[r] = (range_base, range_limit, range_size, SPI_REGION_NAMES[r], freg)
         return spi_regions
 
     def get_SPI_Protected_Range( self, pr_num ):
@@ -242,7 +258,7 @@ class SPI(hal_base.HALBase):
         base  = self.cs.get_register_field(pr_name, pr_j, 'PRB' ) << SPI_FLA_SHIFT
         # Protected Range Limit corresponds to FLA bits 24:12
         limit = self.cs.get_register_field(pr_name, pr_j, 'PRL' ) << SPI_FLA_SHIFT
-        
+
         wpe = (0 != self.cs.get_register_field(pr_name, pr_j, 'WPE' ))
         rpe = (0 != self.cs.get_register_field(pr_name, pr_j, 'RPE' ))
 
@@ -323,10 +339,10 @@ class SPI(hal_base.HALBase):
         logger().log( "------------------------------------------------------------" )
         logger().log( "Flash Region             | FREGx Reg | Base     | Limit     " )
         logger().log( "------------------------------------------------------------" )
-        for r in SPI_REGION:
-            (base,limit,freg) = self.get_SPI_region( r )
-            logger().log( '%d %-022s | %08X  | %08X | %08X ' % (r,SPI_REGION_NAMES[r],freg,base,limit) )
-
+        regions = self.get_SPI_regions()
+        for region_id, region in regions.iteritems():
+            base, limit, size, name, freg = region
+            logger().log( '%d %-022s | %08X  | %08X | %08X ' % (region_id, name, freg, base, limit) )
 
     def display_BIOS_region( self ):
         bfpreg = self.cs.read_register('BFPR' )
@@ -350,17 +366,18 @@ class SPI(hal_base.HALBase):
         bmwag = self.cs.get_register_field('FRAP', fracc, 'BMWAG' )
         logger().log( '' )
         logger().log( "BIOS Region Write Access Grant (%02X):" % bmwag )
-        for freg in (BIOS, ME, GBE):
-            logger().log( "  %-12s: %1d" % (SPI_REGION[ freg ], (0 != bmwag&(1<<freg))) )
+        regions = self.get_SPI_regions()
+        for region_id in regions:
+            logger().log( "  %-12s: %1d" % (SPI_REGION[region_id], (0 != bmwag&(1<<region_id))) )
         logger().log( "BIOS Region Read Access Grant (%02X):" % bmrag )
-        for freg in (BIOS, ME, GBE):
-            logger().log( "  %-12s: %1d" % (SPI_REGION[ freg ], (0 != bmrag&(1<<freg))) )
+        for region_id in regions:
+            logger().log( "  %-12s: %1d" % (SPI_REGION[region_id ], (0 != bmrag&(1<<region_id))) )
         logger().log( "BIOS Region Write Access (%02X):" % brwa )
-        for freg in SPI_REGION:
-            logger().log( "  %-12s: %1d" % (SPI_REGION[ freg ], (0 != brwa&(1<<freg))) )
+        for region_id in regions:
+            logger().log( "  %-12s: %1d" % (SPI_REGION[ region_id ], (0 != brwa&(1<<region_id))) )
         logger().log( "BIOS Region Read Access (%02X):" % brra )
-        for freg in SPI_REGION:
-            logger().log( "  %-12s: %1d" % (SPI_REGION[ freg ], (0 != brra&(1<<freg))) )
+        for region_id in regions:
+            logger().log( "  %-12s: %1d" % (SPI_REGION[ region_id ], (0 != brra&(1<<region_id))) )
 
     def display_SPI_Protected_Ranges( self ):
         logger().log( "SPI Protected Ranges" )
@@ -537,7 +554,7 @@ class SPI(hal_base.HALBase):
     def read_spi(self, spi_fla, data_byte_count ):
 
         self.check_hardware_sequencing()
-	
+
         buf = []
         dbc = SPI_READ_WRITE_DEF_DBC
         if (data_byte_count >= SPI_READ_WRITE_MAX_DBC):
@@ -588,7 +605,7 @@ class SPI(hal_base.HALBase):
         return buf
 
     def write_spi(self, spi_fla, buf ):
-	
+
         self.check_hardware_sequencing()
 
         write_ok = True
@@ -647,3 +664,25 @@ class SPI(hal_base.HALBase):
             logger().error( "SPI Flash erase cycle failed" )
 
         return erase_ok
+
+    #
+    # SPI JEDEC ID operations
+    #
+
+    def get_SPI_JEDEC_ID(self):
+
+        self.check_hardware_sequencing()
+
+        if not self._send_spi_cycle( HSFCTL_JEDEC_CYCLE, 4, 0 ):
+            logger().error( 'SPI JEDEC ID cycle failed' )
+        id = self.spi_reg_read( self.fdata0_off )
+
+        return ((id & 0xFF) << 16) | (id & 0xFF00) | ( (id >> 16) & 0xFF )
+
+    def get_SPI_JEDEC_ID_decoded(self):
+
+        jedec_id = self.get_SPI_JEDEC_ID()
+        manu = JEDEC_ID.MANUFACTURER.get((jedec_id >> 16) & 0xff, 'Unknown')
+        part = JEDEC_ID.DEVICE.get( jedec_id, 'Unknown')
+
+        return (jedec_id, manu, part)

@@ -25,5 +25,12 @@
       "loader_sha256" : { "sha256": "7ea33696c91761e95697549e0b0f84db2cf4033216cd16c3264b10daa31f598c" },
       "loader_sha256acnt" : { "sha256acnt": "1646b3943ce7a1cf2df61e2c774f8ecaefb917266eef45d81c02f9ea05109eb7" }
     }
+  },
+  "LoJax": {
+    "description": "LoJax: First UEFI rootkit found in the wild (https://www.welivesecurity.com/2018/09/27/lojax-first-uefi-rootkit-found-wild-courtesy-sednit-group/)",
+    "match": {
+      "SecDxe_file_info": { "name": "SecDxe", "guid": "682894B5-6B70-4EBA-9E90-A607E5676297"},
+      "SecDxe_hash_data": { "sha1": "f2be778971ad9df2082a266bd04ab657bd287413", "sha256": "7ea33696c91761e95697549e0b0f84db2cf4033216cd16c3264b10daa31f598c"}
+    }
   }
 }

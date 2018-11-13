@@ -44,6 +44,7 @@
   <xs:attribute name="enable_bit" type="xs:string" use="optional"/>
   <xs:attribute name="desc" type="xs:string" use="optional"/>
   <xs:attribute name="offset" type="xs:string" use="optional"/>
+  <xs:attribute name="fixed_address" type="xs:string" use="optional"/>
 </xs:attributeGroup>
 
 <xs:complexType name="mmiobar_type">
@@ -70,6 +71,7 @@
   <xs:attribute name="size" type="xs:string" use="optional"/>
   <xs:attribute name="desc" type="xs:string" use="optional"/>
   <xs:attribute name="offset" type="xs:string" use="optional"/>
+  <xs:attribute name="fixed_address" type="xs:string" use="optional"/>
 </xs:attributeGroup>
 
 <xs:complexType name="iobar_type">
@@ -117,6 +119,7 @@
     <xs:enumeration value="pcicfg" />
     <xs:enumeration value="mmcfg" />
     <xs:enumeration value="msgbus" />
+    <xs:enumeration value="mm_msgbus" />
   </xs:restriction>
 </xs:simpleType>
 

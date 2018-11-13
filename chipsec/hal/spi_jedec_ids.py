@@ -1,6 +1,7 @@
+#!/usr/bin/python
 #CHIPSEC: Platform Security Assessment Framework
-#Copyright (c) 2010-2015, Intel Corporation
-# 
+#Copyright (c) 2018, Intel Corporation
+#
 #This program is free software; you can redistribute it and/or
 #modify it under the terms of the GNU General Public License
 #as published by the Free Software Foundation; Version 2.
@@ -18,7 +19,20 @@
 #chipsec@intel.com
 #
 
+"""
+JEDED ID : Manufacturers and Device IDs
+"""
 
+class JEDEC_ID:
 
-###\defgroup  core Core Components
-# Components providing core functionality
+    MANUFACTURER = { 0xEF: 'Winbond',
+                     0xC2: 'Macronix' }
+
+    DEVICE = { 0xEF4018: 'W25Q128 (SPI)',
+               0xEF6018: 'W25Q128 (QPI)',
+               0xEF4017: 'W25Q64FV (SPI)',
+               0xEF6017: 'W25Q64FV (QPI)',
+               0xEF7016: 'W25Q32JV',
+               0xEF4019: 'W25Q256',
+               0xC22017: 'MX25L6408' ,
+               0xC22018: 'MX25L12805' }

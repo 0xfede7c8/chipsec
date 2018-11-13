@@ -1,6 +1,6 @@
 #!/usr/bin/python
 #CHIPSEC: Platform Security Assessment Framework
-#Copyright (c) 2010-2016, Intel Corporation
+#Copyright (c) 2010-2018, Intel Corporation
 # 
 #This program is free software; you can redistribute it and/or
 #modify it under the terms of the GNU General Public License
@@ -24,7 +24,7 @@
 # -------------------------------------------------------------------------------
 #
 # CHIPSEC: Platform Hardware Security Assessment Framework
-# (c) 2010-2016 Intel Corporation
+# (c) 2010-2018 Intel Corporation
 #
 # -------------------------------------------------------------------------------
 
@@ -40,7 +40,6 @@ References:
 usage:
     >>> msgbus_reg_read( port, register )
     >>> msgbus_reg_write( port, register, data )
-
     >>> msgbus_read_message( port, register, opcode )
     >>> msgbus_write_message( port, register, opcode, data )
     >>> msgbus_send_message( port, register, opcode, data )
@@ -124,11 +123,11 @@ class MsgBus(hal_base.HALBase):
         return mdr
 
     def __hide_p2sb(self, hide):
-        hidden = self.cs.read_register('P2SBC') == 0xFFFF
+        hidden = not self.cs.is_device_enabled('P2SBC')
         if hide:
-            self.cs.write_register_field('P2SBC', 'HIDE', 1)
+            self.cs.write_register_field('P2SB_HIDE', 'HIDE', 1)
         else:
-            self.cs.write_register_field('P2SBC', 'HIDE', 0)
+            self.cs.write_register_field('P2SB_HIDE', 'HIDE', 0)
         return hidden
 
     #
