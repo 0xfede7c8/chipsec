@@ -54,6 +54,8 @@ import chipsec.hal.uefi
 import chipsec.hal.spi
 import chipsec.hal.uefi_search
 
+import yara
+
 TAGS = [MTAG_BIOS]
 
 DEF_FWIMAGE_FILE = 'fw.bin'
@@ -90,14 +92,38 @@ class blacklist(BaseModule):
         BaseModule.__init__(self)
         self.uefi = chipsec.hal.uefi.UEFI( self.cs )
         self.cfg_name = 'blacklist.json'
+        self.yara_dir = 'yara'
+        self.output_file = "result.json"
         self.image = None
         self.efi_blacklist = None
+        self.rls = {}
+        self.test_result = []
 
     def is_supported(self):
         return True
 
     def blacklist_callback(self, efi_module):
-        return chipsec.hal.uefi_search.check_match_criteria(efi_module, self.efi_blacklist, self.logger)
+        #print len(efi_module.Image)
+        res = False
+        for i in self.rls:
+            matches_res = self.rls[i].match(data=efi_module.Image)
+            if len(matches_res) > 0 :
+                r = {}
+                r["name"] = i[:-5]
+                r["result"] = "Failed"
+                self.test_result.append(r)
+                res = True
+        #return chipsec.hal.uefi_search.check_match_criteria(efi_module, self.efi_blacklist, self.logger)
+        for j in self.efi_blacklist:
+            s = {}
+            s[j] = self.efi_blacklist[j]            
+            if chipsec.hal.uefi_search.check_match_criteria(efi_module, s, self.logger):
+                r = {}
+                r["name"] = j
+                r["result"] = "Failed"
+                self.test_result.append(r)
+                res = True
+        return res
 
     def check_blacklist( self ):
         res = ModuleResult.PASSED
@@ -142,12 +168,8 @@ class blacklist(BaseModule):
         image_file = DEF_FWIMAGE_FILE
         if len(module_argv) == 0:
             # Read firmware image directly from SPI flash memory
-            self.spi = chipsec.hal.spi.SPI( self.cs )
-            (base,limit,freg) = self.spi.get_SPI_region( chipsec.hal.spi.BIOS )
-            image_size = limit + 1 - base
-            self.logger.log( "[*] dumping FW image from ROM to %s: 0x%08X bytes at [0x%08X:0x%08X]" % (image_file,base,limit,image_size) )
-            self.logger.log( "[*] this may take a few minutes (instead, use 'chipsec_util spi dump')..." )
-            self.spi.read_spi_to_file( base, image_size, image_file )
+            self.logger.log( "[*] Should provide BIOS image" )
+            return ModuleResult.ERROR
         elif len(module_argv) > 0:
             # Use provided firmware image 
             image_file = module_argv[0]
@@ -157,10 +179,23 @@ class blacklist(BaseModule):
 
         # Load JSON config with black-listed EFI modules
         if len(module_argv) > 1: self.cfg_name = module_argv[1]
+        #if len(module_argv) > 2: self.yara_dir = module_argv[2]
+        print module_argv
+        if len(module_argv) > 2: self.output_file = module_argv[2]
         cfg_pth = os.path.join( os.path.dirname(os.path.realpath(__file__)), self.cfg_name )
         with open(cfg_pth, 'r') as blacklist_json:
              self.efi_blacklist = json.load( blacklist_json )
-
-        return self.check_blacklist()
+        #Read all yara rules
+        yara_full_path = os.path.join( os.path.dirname(os.path.realpath(__file__)), self.yara_dir )
+        for subdir, dirs, files in os.walk(yara_full_path):
+            for file in files:
+                 fl = os.path.join(subdir, file)
+                 with open(fl) as fh:
+                     rules = yara.compile(file=fh)
+                     self.rls[file]=rules
+        r = self.check_blacklist()
+        print json.dumps(self.test_result, indent=2, separators=(',', ': '))
+        chipsec.file.write_file( "%s" % self.output_file, json.dumps(self.test_result, indent=2, separators=(',', ': ')) )
+        return r
 
 

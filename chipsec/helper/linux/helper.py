@@ -1066,9 +1066,9 @@ class LinuxHelper(Helper):
         if CompressionType == 0: # not compressed
             shutil.copyfile( CompressedFileName, OutputFileName )
         elif CompressionType == 0x01:
-            data = self.decompress_data( self.decompression_oder_type1, CompressedFileData, CompressionType)
+            data = self.decompress_data( self.decompression_oder_type1, CompressedFileData, CompressionType )
         elif CompressionType == 0x02:
-            data = self.decompress_data( self.decompression_oder_type2, CompressedFileData )
+            data = self.decompress_data( self.decompression_oder_type2, CompressedFileData, CompressionType )
         if CompressionType != 0x00:
             if data is not None:
                 chipsec.file.write_file( OutputFileName, data )

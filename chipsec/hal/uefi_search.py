@@ -78,12 +78,13 @@ from chipsec.hal.spi_uefi import *
 # Unless it's a EFI binary:
 # - with MD5 hash "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" AND SHA-1 hash "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH"
 #
-MATCH_NAME        = 0x1
-MATCH_GUID        = (0x1 << 1)
-MATCH_REGEXP      = (0x1 << 2)
-MATCH_HASH_MD5    = (0x1 << 3)
-MATCH_HASH_SHA1   = (0x1 << 4)
-MATCH_HASH_SHA256 = (0x1 << 5)
+MATCH_NAME             = 0x1
+MATCH_GUID             = (0x1 << 1)
+MATCH_REGEXP           = (0x1 << 2)
+MATCH_HASH_MD5         = (0x1 << 3)
+MATCH_HASH_SHA1        = (0x1 << 4)
+MATCH_HASH_SHA256      = (0x1 << 5)
+MATCH_HASH_SHA256_ACNT = (0x1 << 6)
 
 def check_rules( efi, rules, entry_name, _log, bLog=True ):
     bfound = False
@@ -97,12 +98,13 @@ def check_rules( efi, rules, entry_name, _log, bLog=True ):
         #
         # Determine which criteria are defined in the current rule
         #
-        if ('name'   in rule) and (rule['name']   != ''): match_mask |= MATCH_NAME
-        if ('guid'   in rule) and (rule['guid']   != ''): match_mask |= MATCH_GUID
-        if ('regexp' in rule) and (rule['regexp'] != ''): match_mask |= MATCH_REGEXP
-        if ('md5'    in rule) and (rule['md5']    != ''): match_mask |= MATCH_HASH_MD5
-        if ('sha1'   in rule) and (rule['sha1']   != ''): match_mask |= MATCH_HASH_SHA1
-        if ('sha256' in rule) and (rule['sha256'] != ''): match_mask |= MATCH_HASH_SHA256
+        if ('name'       in rule) and (rule['name']       != ''): match_mask |= MATCH_NAME
+        if ('guid'       in rule) and (rule['guid']       != ''): match_mask |= MATCH_GUID
+        if ('regexp'     in rule) and (rule['regexp']     != ''): match_mask |= MATCH_REGEXP
+        if ('md5'        in rule) and (rule['md5']        != ''): match_mask |= MATCH_HASH_MD5
+        if ('sha1'       in rule) and (rule['sha1']       != ''): match_mask |= MATCH_HASH_SHA1
+        if ('sha256'     in rule) and (rule['sha256']     != ''): match_mask |= MATCH_HASH_SHA256
+        if ('sha256acnt' in rule) and (rule['sha256acnt'] != ''): match_mask |= MATCH_HASH_SHA256_ACNT
         #
         # Check criteria defined in the current rule against the current EFI module
         #
@@ -124,16 +126,19 @@ def check_rules( efi, rules, entry_name, _log, bLog=True ):
             if efi.SHA1 == rule['sha1']: match_result |= MATCH_HASH_SHA1
         if (match_mask & MATCH_HASH_SHA256) == MATCH_HASH_SHA256:
             if efi.SHA256 == rule['sha256']: match_result |= MATCH_HASH_SHA256
+        if (match_mask & MATCH_HASH_SHA256_ACNT) == MATCH_HASH_SHA256_ACNT:
+            if efi.SHA256_ACNT == rule['sha256acnt']: match_result |= MATCH_HASH_SHA256_ACNT
 
         brule_match = ((match_result & match_mask) == match_mask)
         if brule_match and bLog:
             _log.log_important( "match '%s'" % fname )
-            if (match_result & MATCH_NAME       ) == MATCH_NAME       : _log.log( "    name  : '%s'" % rule['name'] )
-            if (match_result & MATCH_GUID       ) == MATCH_GUID       : _log.log( "    GUID  : {%s}" % rule['guid'] )
-            if (match_result & MATCH_REGEXP     ) == MATCH_REGEXP     : _log.log( "    regexp: bytes '%s' at offset %Xh" % (what,offset) )
-            if (match_result & MATCH_HASH_MD5   ) == MATCH_HASH_MD5   : _log.log( "    MD5   : %s" % rule['md5'] )
-            if (match_result & MATCH_HASH_SHA1  ) == MATCH_HASH_SHA1  : _log.log( "    SHA1  : %s" % rule['sha1'] )
-            if (match_result & MATCH_HASH_SHA256) == MATCH_HASH_SHA256: _log.log( "    SHA256: %s" % rule['sha256'] )
+            if (match_result & MATCH_NAME            ) == MATCH_NAME            : _log.log( "    name       : '%s'" % rule['name'] )
+            if (match_result & MATCH_GUID            ) == MATCH_GUID            : _log.log( "    GUID       : {%s}" % rule['guid'] )
+            if (match_result & MATCH_REGEXP          ) == MATCH_REGEXP          : _log.log( "    regexp     : bytes '%s' at offset %Xh" % (what,offset) )
+            if (match_result & MATCH_HASH_MD5        ) == MATCH_HASH_MD5        : _log.log( "    MD5        : %s" % rule['md5'] )
+            if (match_result & MATCH_HASH_SHA1       ) == MATCH_HASH_SHA1       : _log.log( "    SHA1       : %s" % rule['sha1'] )
+            if (match_result & MATCH_HASH_SHA256     ) == MATCH_HASH_SHA256     : _log.log( "    SHA256     : %s" % rule['sha256'] )
+            if (match_result & MATCH_HASH_SHA256_ACNT) == MATCH_HASH_SHA256_ACNT: _log.log( "    SHA256_ACNT: %s" % rule['sha256acnt'] )
         #
         # Rules are OR'ed unless matching rule is explicitly excluded from match
         #

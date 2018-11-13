@@ -46,6 +46,11 @@ import binascii
 import json
 #import phex
 
+import pefile
+from functools import partial
+import io
+
+
 from chipsec.helper.oshelper import helper
 from chipsec.logger import *
 from chipsec.file import *
@@ -67,6 +72,429 @@ type2ext = {EFI_SECTION_PE32: 'pe32', EFI_SECTION_TE: 'te', EFI_SECTION_PIC: 'pi
 # and write them on the file system
 #
 WRITE_ALL_HASHES = False
+
+def image_minus_timestamp_(image):
+    Data = ""
+    try:
+        pe = pefile.PE(None,image, fast_load=True)
+    except: return image
+    image_file_header_offset = pe.FILE_HEADER.get_file_offset()
+    relative_timestamp_offset = 4 
+    file_timestamp_offset = image_file_header_offset + relative_timestamp_offset
+    return image[:file_timestamp_offset]+image[file_timestamp_offset+4:]
+
+def authenticode_data_minus_timestamp_(image):
+    Data = ""
+    try:
+        pe = pefile.PE(None,image, fast_load=True)
+    except: return image
+    Offset = pe.OPTIONAL_HEADER.get_file_offset()
+    Offset += pe.OPTIONAL_HEADER.get_field_relative_offset('CheckSum')
+    Header = pe.get_data(0, pe.OPTIONAL_HEADER.SizeOfHeaders)
+
+    image_file_header_offset = pe.FILE_HEADER.get_file_offset()
+    relative_timestamp_offset = 4 
+    file_timestamp_offset = image_file_header_offset + relative_timestamp_offset
+
+    Header_cut_Offset = Header[0:Offset]
+    if Offset > file_timestamp_offset:
+        Data = Data + Header_cut_Offset[:file_timestamp_offset] + Header_cut_Offset[file_timestamp_offset+4:]
+    else:
+        Data = Data + Header_cut_Offset
+
+    lastOffset = Offset + 4
+    index = pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_SECURITY']
+    CertificateTable = pe.OPTIONAL_HEADER.DATA_DIRECTORY[index]
+    Offset = CertificateTable.get_file_offset()
+    SigOff = CertificateTable.VirtualAddress
+
+    Data = Data + Header[lastOffset:Offset]
+    Data = Data + Header[Offset+8:pe.OPTIONAL_HEADER.SizeOfHeaders]
+
+    sections = [ s for s in pe.sections if s.SizeOfRawData ]
+    sections = sorted(sections, key=lambda s: s.PointerToRawData)
+    for s in sections:
+        Data = Data + s.get_data()
+    sect_end = max([ s.PointerToRawData+s.SizeOfRawData for s in pe.sections ])
+    SigOff -= sect_end
+    if SigOff < 0:
+        return Data
+
+    print "authenticode_data_minus_timestamp_ NOT TESTED FLOW"
+
+    idx = sect_end
+    if SigOff:
+        Data = Data + image[idx:idx+SigOff]
+    sig_hdr = image[idx:idx+8]
+    size, hdr_sig = struct.unpack("<II", sig_hdr)
+    
+    r = image[idx+size:] 
+    Data = Data + r
+
+    return Data
+
+def authenticode_data_(image):
+    Data = ""
+    try:
+        pe = pefile.PE(None,image, fast_load=True)
+    except: return image
+    Offset = pe.OPTIONAL_HEADER.get_file_offset()
+    Offset += pe.OPTIONAL_HEADER.get_field_relative_offset('CheckSum')
+    Header = pe.get_data(0, pe.OPTIONAL_HEADER.SizeOfHeaders)
+
+    Data = Data + Header[0:Offset]
+
+    lastOffset = Offset + 4
+    index = pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_SECURITY']
+    CertificateTable = pe.OPTIONAL_HEADER.DATA_DIRECTORY[index]
+    Offset = CertificateTable.get_file_offset()
+    SigOff = CertificateTable.VirtualAddress
+
+    Data = Data + Header[lastOffset:Offset]
+    Data = Data + Header[Offset+8:pe.OPTIONAL_HEADER.SizeOfHeaders]
+
+    sections = [ s for s in pe.sections if s.SizeOfRawData ]
+    sections = sorted(sections, key=lambda s: s.PointerToRawData)
+    for s in sections:
+        Data = Data + s.get_data()
+    sect_end = max([ s.PointerToRawData+s.SizeOfRawData for s in pe.sections ])
+    SigOff -= sect_end
+    if SigOff < 0:
+        return Data
+
+    print "authenticode_data_ NOT TESTED FLOW"
+
+    idx = sect_end
+    if SigOff:
+        Data = Data + image[idx:idx+SigOff]
+    sig_hdr = image[idx:idx+8]
+    size, hdr_sig = struct.unpack("<II", sig_hdr)
+    
+    r = image[idx+size:] 
+    Data = Data + r
+
+    return Data
+
+class PEFileFeatures():
+    ''' Create instance of PEFileFeatures class. This class pulls static
+        features out of a PE file using the python pefile module.
+    '''
+
+    def __init__(self):
+        ''' Init method '''
+
+        # Dense feature list: this only functions to ensure that all of these
+        #               features get extracted with a sanity check at the end.
+        self._dense_feature_list = None
+        self._dense_features = None
+
+        # Okay now the sparse fields
+        self._sparse_feature_list = None
+        self._sparse_features = None
+
+        # Verbose
+        self._verbose = False
+
+        # Warnings handle
+        self._warnings = []
+
+        # Set the features that I'm expected PE File to extract, note this is just
+        # for sanity checking, meaning that if you don't get some of these features
+        # the processing will spit out warnings for each feature not extracted.
+        self.set_dense_features(['check_sum', 'generated_check_sum', 'compile_date', 'debug_size', 'export_size', 'iat_rva', 'major_version', \
+                                 'minor_version', 'number_of_bound_import_symbols', 'number_of_bound_imports', 'number_of_export_symbols', \
+                                 'number_of_import_symbols', 'number_of_imports', 'number_of_rva_and_sizes', 'number_of_sections', 'pe_warnings', \
+                                 'std_section_names', 'total_size_pe', 'virtual_address', 'virtual_size', 'virtual_size_2', \
+                                 'datadir_IMAGE_DIRECTORY_ENTRY_BASERELOC_size', 'datadir_IMAGE_DIRECTORY_ENTRY_RESOURCE_size', \
+                                 'datadir_IMAGE_DIRECTORY_ENTRY_IAT_size', 'datadir_IMAGE_DIRECTORY_ENTRY_IMPORT_size', \
+                                 'pe_char', 'pe_dll', 'pe_driver', 'pe_exe', 'pe_i386', 'pe_majorlink', 'pe_minorlink', \
+                                 'file_align', 'sec_align', 'subsystem', 'addr_of_entry_point', 'addr_code_sec', 'loader_flag', \
+                                 'sec_chars_data', 'sec_chars_rdata', 'sec_chars_code', 'sec_chars_reloc', 'sec_chars_text', 'sec_chars_rsrc', \
+                                 'sec_rawptr_rsrc', 'sec_rawsize_rsrc', 'sec_vasize_rsrc', 'sec_raw_execsize', \
+                                 'sec_rawptr_data', 'sec_rawptr_text', 'sec_rawsize_data', 'sec_rawsize_text', 'sec_va_execsize', \
+                                 'sec_vasize_data', 'sec_vasize_text', 'size_code', 'size_image', 'size_initdata', 'size_uninit'])
+        #                                 'sec_entropy_data', 'sec_entropy_rdata', 'sec_entropy_reloc', 'sec_entropy_text', 'sec_entropy_rsrc', \
+        self.set_sparse_features(['imported_symbols', 'section_names', 'pe_warning_strings'])
+
+    def execute(self, input_data):
+
+        ''' Process the input bytes with pefile '''
+        raw_bytes = input_data
+
+        # Have the PE File module process the file
+        pefile_handle, error_str = self.open_using_pefile('unknown', raw_bytes)
+        if not pefile_handle:
+            return {'error': error_str}
+
+        # Now extract the various features using pefile
+        return self.extract_features_using_pefile(pefile_handle)
+
+
+    def set_dense_features(self, dense_feature_list):
+        ''' Set the dense feature list that the Python pefile module should extract.
+            This is really just sanity check functionality, meaning that these
+            are the features you are expecting to get, and a warning will spit
+            out if you don't get some of these. '''
+        self._dense_feature_list = dense_feature_list
+
+    def get_dense_features(self):
+        ''' Set the dense feature list that the Python pefile module should extract. '''
+        #s = "{"
+        #for key in sorted(self._dense_features.iterkeys()):
+        #    s = s + " '%s' : %s," % (key, self._dense_features[key])
+        #s = s[:-1]+" }"
+        #return s
+        return self._dense_features
+
+    def set_sparse_features(self, sparse_feature_list):
+        ''' Set the sparse feature list that the Python pefile module should extract.
+            This is really just sanity check functionality, meaning that these
+            are the features you are expecting to get, and a warning will spit
+            out if you don't get some of these. '''
+        self._sparse_feature_list = sparse_feature_list
+
+    def get_sparse_features(self):
+        ''' Set the sparse feature list that the Python pefile module should extract. '''
+        return self._sparse_features
+
+
+    # Make sure pe can parse this file
+    def open_using_pefile(self, input_name, input_bytes):
+        ''' Open the PE File using the Python pefile module. '''
+        try:
+            pe = pefile.PE(data=input_bytes, fast_load=False)
+        except Exception, error:
+            print 'warning: pe_fail (with exception from pefile module) on file: %s' % input_name
+            error_str =  '(Exception):, %s' % (str(error))
+            return None, error_str
+
+        # Now test to see if the features are there/extractable if not return FAIL flag
+        if (pe.PE_TYPE is None or pe.OPTIONAL_HEADER is None or len(pe.OPTIONAL_HEADER.DATA_DIRECTORY) < 7):
+            print 'warning: pe_fail on file: %s' % input_name
+            error_str = 'warning: pe_fail on file: %s' % input_name
+            return None, error_str
+
+        # Success
+        return pe, None
+
+    # Extract various set of features using PEfile module
+    def extract_features_using_pefile(self, pe):
+        ''' Process the PE File using the Python pefile module. '''
+
+        # Store all extracted features into feature lists
+        extracted_dense = {}
+        extracted_sparse = {}
+
+        # Now slog through the info and extract the features
+        feature_not_found_flag = -99
+        feature_default_value = 0
+        self._warnings = []
+
+        # Set all the dense features and sparse features to 'feature not found'
+        # value and then check later to see if it was found
+        for feature in self._dense_feature_list:
+            extracted_dense[feature] = feature_not_found_flag
+        for feature in self._sparse_feature_list:
+            extracted_sparse[feature] = feature_not_found_flag
+
+
+        # Check to make sure all the section names are standard
+        std_sections = ['.text', '.bss', '.rdata', '.data', '.rsrc', '.edata', '.idata', \
+                        '.pdata', '.debug', '.reloc', '.stab', '.stabstr', '.tls', \
+                        '.crt', '.gnu_deb', '.eh_fram', '.exptbl', '.rodata']
+        for i in range(200):
+            std_sections.append('/'+str(i))
+        std_section_names = 1
+        extracted_sparse['section_names'] = []
+        for section in pe.sections:
+            name = convertToAsciiNullTerm(section.Name).lower()
+            extracted_sparse['section_names'].append(name)
+            if (name not in std_sections):
+                std_section_names = 0
+
+        extracted_dense['std_section_names']      = std_section_names
+        extracted_dense['debug_size']             = pe.OPTIONAL_HEADER.DATA_DIRECTORY[6].Size
+        extracted_dense['major_version']	      = pe.OPTIONAL_HEADER.MajorImageVersion
+        extracted_dense['minor_version']          = pe.OPTIONAL_HEADER.MinorImageVersion
+        extracted_dense['iat_rva']			      = pe.OPTIONAL_HEADER.DATA_DIRECTORY[1].VirtualAddress
+        extracted_dense['export_size']		      = pe.OPTIONAL_HEADER.DATA_DIRECTORY[0].Size
+        extracted_dense['check_sum']	          = pe.OPTIONAL_HEADER.CheckSum
+        try:
+            extracted_dense['generated_check_sum'] = pe.generate_checksum()
+        except ValueError:
+            #self._logger.logMessage('warning', 'pe.generate_check_sum() threw an exception, setting to 0!')
+            extracted_dense['generated_check_sum'] = 0
+        if (len(pe.sections) > 0):
+            extracted_dense['virtual_address']     = pe.sections[0].VirtualAddress
+            extracted_dense['virtual_size']	       = pe.sections[0].Misc_VirtualSize
+        extracted_dense['number_of_sections']      = pe.FILE_HEADER.NumberOfSections
+        extracted_dense['compile_date']            = pe.FILE_HEADER.TimeDateStamp
+        extracted_dense['number_of_rva_and_sizes'] = pe.OPTIONAL_HEADER.NumberOfRvaAndSizes
+        extracted_dense['subsystem']               = pe.OPTIONAL_HEADER.Subsystem
+        extracted_dense['addr_of_entry_point']     = pe.OPTIONAL_HEADER.AddressOfEntryPoint
+        extracted_dense['addr_code_sec']           = pe.OPTIONAL_HEADER.BaseOfCode
+        extracted_dense['loader_flag']             = pe.OPTIONAL_HEADER.LoaderFlags
+        extracted_dense['total_size_pe']	   = len(pe.__data__)
+
+
+        # Number of import and exports
+        if hasattr(pe,'DIRECTORY_ENTRY_IMPORT'):
+            extracted_dense['number_of_imports'] = len(pe.DIRECTORY_ENTRY_IMPORT)
+            num_imported_symbols = 0
+            for module in pe.DIRECTORY_ENTRY_IMPORT:
+                num_imported_symbols += len(module.imports)
+            extracted_dense['number_of_import_symbols'] = num_imported_symbols
+
+        if hasattr(pe, 'DIRECTORY_ENTRY_BOUND_IMPORT'):
+            extracted_dense['number_of_bound_imports'] = len(pe.DIRECTORY_ENTRY_BOUND_IMPORT)
+            num_imported_symbols = 0
+            for module in pe.DIRECTORY_ENTRY_BOUND_IMPORT:
+                num_imported_symbols += len(module.entries)
+            extracted_dense['number_of_bound_import_symbols'] = num_imported_symbols
+
+        if hasattr(pe,'DIRECTORY_ENTRY_EXPORT'):
+            extracted_dense['number_of_export_symbols'] = len(pe.DIRECTORY_ENTRY_EXPORT.symbols)
+            symbol_set = set()
+            for symbol in pe.DIRECTORY_ENTRY_EXPORT.symbols:
+                symbol_info = 'unknown'
+                if (not symbol.name):
+                    symbol_info = 'ordinal=' + str(symbol.ordinal)
+                else:
+                    symbol_info = 'name=' + symbol.name
+
+                symbol_set.add(convertToUTF8('%s'%(symbol_info)).lower())
+
+            # Now convert set to list and add to features
+            extracted_sparse['ExportedSymbols'] = list(symbol_set)
+
+        # Specific Import info (Note this will be a sparse field woo hoo!)
+        if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
+            symbol_set = set()
+            for module in pe.DIRECTORY_ENTRY_IMPORT:
+                for symbol in module.imports:
+                    symbol_info = 'unknown'
+                    if symbol.import_by_ordinal is True:
+                        symbol_info = 'ordinal=' + str(symbol.ordinal)
+                    else:
+                        symbol_info = 'name=' + symbol.name
+                        #symbol_info['hint'] = symbol.hint
+                    if symbol.bound:
+                        symbol_info += ' bound=' + str(symbol.bound)
+
+                    symbol_set.add(convertToUTF8('%s:%s'%(module.dll, symbol_info)).lower())
+
+            # Now convert set to list and add to features
+            extracted_sparse['imported_symbols'] = list(symbol_set)
+
+
+        # Do we have a second section
+        if (len(pe.sections) >= 2):
+            extracted_dense['virtual_size_2']	   = pe.sections[1].Misc_VirtualSize
+
+        extracted_dense['size_image']             = pe.OPTIONAL_HEADER.SizeOfImage
+        extracted_dense['size_code']              = pe.OPTIONAL_HEADER.SizeOfCode
+        extracted_dense['size_initdata']          = pe.OPTIONAL_HEADER.SizeOfInitializedData
+        extracted_dense['size_uninit']            = pe.OPTIONAL_HEADER.SizeOfUninitializedData
+        extracted_dense['pe_majorlink']           = pe.OPTIONAL_HEADER.MajorLinkerVersion
+        extracted_dense['pe_minorlink']           = pe.OPTIONAL_HEADER.MinorLinkerVersion
+        extracted_dense['file_align']             = pe.OPTIONAL_HEADER.FileAlignment
+        extracted_dense['sec_align']              = pe.OPTIONAL_HEADER.SectionAlignment
+        extracted_dense['pe_driver']              = 1 if pe.is_driver() else 0
+        extracted_dense['pe_exe']                 = 1 if pe.is_exe() else 0
+        extracted_dense['pe_dll']                 = 1 if pe.is_dll() else 0
+        extracted_dense['pe_i386']                = 1
+        if pe.FILE_HEADER.Machine != 0x014c:
+            extracted_dense['pe_i386'] = 0
+        extracted_dense['pe_char']                = pe.FILE_HEADER.Characteristics
+
+        # Data directory features!!
+        datadirs = { 0: 'IMAGE_DIRECTORY_ENTRY_EXPORT', 1:'IMAGE_DIRECTORY_ENTRY_IMPORT', 2:'IMAGE_DIRECTORY_ENTRY_RESOURCE', 5:'IMAGE_DIRECTORY_ENTRY_BASERELOC', 12:'IMAGE_DIRECTORY_ENTRY_IAT'}
+        for idx, datadir in datadirs.items():
+            datadir = pefile.DIRECTORY_ENTRY[ idx ]
+            if len(pe.OPTIONAL_HEADER.DATA_DIRECTORY) <= idx:
+                continue
+
+            directory = pe.OPTIONAL_HEADER.DATA_DIRECTORY[idx]
+            extracted_dense['datadir_%s_size' % datadir] = directory.Size
+
+        # Section features
+        section_flags = ['IMAGE_SCN_MEM_EXECUTE', 'IMAGE_SCN_CNT_CODE', 'IMAGE_SCN_MEM_WRITE', 'IMAGE_SCN_MEM_READ']
+        rawexecsize = 0
+        vaexecsize = 0
+        for sec in pe.sections:
+            if not sec:
+                continue
+
+            for char in section_flags:
+                # does the section have one of our attribs?
+                if hasattr(sec, char):
+                    rawexecsize += sec.SizeOfRawData
+                    vaexecsize  += sec.Misc_VirtualSize
+                    break
+
+            # Take out any weird characters in section names
+            secname = convertToAsciiNullTerm(sec.Name).lower()
+            secname = secname.replace('.','')
+            #extracted_dense['sec_entropy_%s' % secname ] = sec.get_entropy()
+            extracted_dense['sec_rawptr_%s' % secname] = sec.PointerToRawData
+            extracted_dense['sec_rawsize_%s' % secname] = sec.SizeOfRawData
+            extracted_dense['sec_vasize_%s' % secname] = sec.Misc_VirtualSize
+            extracted_dense['sec_chars_%s' % secname] = hex(sec.Characteristics)
+
+        extracted_dense['sec_va_execsize'] = vaexecsize
+        extracted_dense['sec_raw_execsize'] = rawexecsize
+
+        # Register if there were any pe warnings
+        warnings = pe.get_warnings()
+        if (warnings):
+            extracted_dense['pe_warnings'] = 1
+            extracted_sparse['pe_warning_strings'] = warnings
+        else:
+            extracted_dense['pe_warnings'] = 0
+
+
+        # Issue a warning if the feature isn't found
+        for feature in self._dense_feature_list:
+            if (extracted_dense[feature] == feature_not_found_flag):
+                extracted_dense[feature] = feature_default_value
+                if (self._verbose):
+                    self.log('info: Feature: %s not found! Setting to %d' % (feature, feature_default_value))
+                    self._warnings.append('Feature: %s not found! Setting to %d' % (feature, feature_default_value))
+
+        # Issue a warning if the feature isn't found
+        for feature in self._sparse_feature_list:
+            if (extracted_sparse[feature] == feature_not_found_flag):
+                extracted_sparse[feature] = feature_default_value
+                if (self._verbose):
+                    self.log('info: Feature: %s not found! Setting to %d' % (feature, feature_default_value))
+                    self._warnings.append('Feature: %s not found! Setting to %d' % (feature, feature_default_value))
+
+
+        # Set the features for the class var
+        self._dense_features = extracted_dense
+        self._sparse_features = extracted_sparse
+
+        return self.get_dense_features() #, self.get_sparse_features()
+
+# Helper functions
+def convertToUTF8(s):
+    if (isinstance(s, unicode)):
+        return s.encode( "utf-8" )
+    try:
+        u = unicode( s, "utf-8" )
+    except:
+        return str(s)
+    utf8 = u.encode( "utf-8" )
+    return utf8
+
+def convertToAsciiNullTerm(s):
+    s = s.split('\x00', 1)[0]
+    return s.decode('ascii', 'ignore')
+
+# Unit test: Create the class, the proper input and run the execute() method for a test
+def pe_extractor(file_data):
+    my_extractor = PEFileFeatures()
+    return my_extractor.execute(file_data)
 
 def decompress_section_data( _uefi, section_dir_path, sec_fs_name, compressed_data, compression_type, remove_files=False ):
     compressed_name = os.path.join(section_dir_path, "%s.gz" % sec_fs_name)
@@ -150,23 +578,37 @@ def modify_uefi_region(data, command, guid, uefi_file = ''):
 DEF_INDENT = "    "
 class EFI_MODULE(object):
     def __init__(self, Offset, Guid, HeaderSize, Attributes, Image):
-        self.Offset     = Offset
-        self.Guid       = Guid
-        self.HeaderSize = HeaderSize
-        self.Attributes = Attributes
-        self.Image      = Image
-        self.ui_string  = None
-        self.isNVRAM    = False
-        self.NVRAMType  = None
+        self.Offset      = Offset
+        self.Guid        = Guid
+        self.HeaderSize  = HeaderSize
+        self.Attributes  = Attributes
+        self.Image       = Image
+        self.ui_string   = None
+        self.isNVRAM     = False
+        self.NVRAMType   = None
 
-        self.indent     = ''
+        self.indent      = ''
 
-        self.MD5        = None
-        self.SHA1       = None
-        self.SHA256     = None
+        self.MD5         = None
+        self.SHA1        = None
+        self.SHA256      = None
+
+        self.MD5_AC      = None
+        self.SHA1_AC     = None
+        self.SHA256_AC   = None
+
+        self.MD5_NT      = None
+        self.SHA1_NT     = None
+        self.SHA256_NT   = None
+
+        self.MD5_ACNT    = None
+        self.SHA1_ACNT   = None
+        self.SHA256_ACNT = None
 
         # a list of children EFI_MODULE nodes to build the EFI_MODULE object model
         self.children   = []
+        self.pe_info    = {}
+  
 
     def name(self):
         return "%s {%s} %s" % (type(self).__name__.encode('ascii', 'ignore'),self.Guid,self.ui_string.encode('ascii', 'ignore') if self.ui_string else '')
@@ -174,10 +616,31 @@ class EFI_MODULE(object):
     def __str__(self):
         _ind = self.indent + DEF_INDENT
         _s = ''
-        if self.MD5   : _s  = "\n%sMD5   : %s" % (_ind,self.MD5)
-        if self.SHA1  : _s += "\n%sSHA1  : %s" % (_ind,self.SHA1)
-        if self.SHA256: _s += "\n%sSHA256: %s" % (_ind,self.SHA256)
+        if self.MD5         : _s  = "\n%sMD5   : %s" % (_ind,self.MD5)
+        if self.SHA1        : _s += "\n%sSHA1  : %s" % (_ind,self.SHA1)
+        if self.SHA256      : _s += "\n%sSHA256: %s" % (_ind,self.SHA256)
+        if self.MD5_AC      : _s += "\n%sAC MD5   : %s" % (_ind,self.MD5_AC)
+        if self.SHA1_AC     : _s += "\n%sAC SHA1  : %s" % (_ind,self.SHA1_AC)
+        if self.SHA256_AC   : _s += "\n%sAC SHA256: %s" % (_ind,self.SHA256_AC)
+        if self.MD5_NT      : _s += "\n%sNT MD5   : %s" % (_ind,self.MD5_NT)
+        if self.SHA1_NT     : _s += "\n%sNT SHA1  : %s" % (_ind,self.SHA1_NT)
+        if self.SHA256_NT   : _s += "\n%sNT SHA256: %s" % (_ind,self.SHA256_NT)
+        if self.MD5_ACNT    : _s += "\n%sACNT MD5   : %s" % (_ind,self.MD5_ACNT)
+        if self.SHA1_ACNT   : _s += "\n%sACNT SHA1  : %s" % (_ind,self.SHA1_ACNT)
+        if self.SHA256_ACNT : _s += "\n%sACNT SHA256: %s" % (_ind,self.SHA256_ACNT)
         return _s
+
+
+    def write_file( self, filename, buffer ):
+        try:
+            f = open(filename, 'ab')
+        except:
+            return 0
+        f.write( buffer )
+        f.close()
+    
+        return True
+    
 
     def calc_hashes( self, off=0 ):
         if self.Image is None: return
@@ -190,7 +653,49 @@ class EFI_MODULE(object):
         hsha256 = hashlib.sha256()
         hsha256.update( self.Image[off:] )
         self.SHA256 = hsha256.hexdigest()
-
+        if type(self) == EFI_SECTION:
+            if self.Type == EFI_SECTION_PE32:
+                self.pe_info = pe_extractor( self.Image[off:] )
+                #authenticode_data_()
+                #try:
+                ac_image = authenticode_data_(self.Image[off:])
+                if ac_image != self.Image[off:]:
+                    ac_hmd5 = hashlib.md5()
+                    ac_hmd5.update( ac_image )
+                    self.MD5_AC = ac_hmd5.hexdigest()
+                    ac_hsha1 = hashlib.sha1()
+                    ac_hsha1.update( ac_image )
+                    self.SHA1_AC   = ac_hsha1.hexdigest()
+                    ac_hsha256 = hashlib.sha256()
+                    ac_hsha256.update( ac_image )
+                    self.SHA256_AC = ac_hsha256.hexdigest()
+                nt_image = image_minus_timestamp_(self.Image[off:])
+                if nt_image != self.Image[off:]:
+                    nt_hmd5 = hashlib.md5()
+                    nt_hmd5.update( nt_image )
+                    self.MD5_NT = nt_hmd5.hexdigest()
+                    nt_hsha1 = hashlib.sha1()
+                    nt_hsha1.update( nt_image )
+                    self.SHA1_NT   = nt_hsha1.hexdigest()
+                    nt_hsha256 = hashlib.sha256()
+                    nt_hsha256.update( nt_image )
+                    self.SHA256_NT = nt_hsha256.hexdigest()
+                acnt_image =  authenticode_data_minus_timestamp_(self.Image[off:])
+                if acnt_image != self.Image[off:]:
+                    acnt_hmd5 = hashlib.md5()
+                    acnt_hmd5.update( acnt_image )
+                    self.MD5_ACNT = acnt_hmd5.hexdigest()
+                    acnt_hsha1 = hashlib.sha1()
+                    acnt_hsha1.update( acnt_image )
+                    self.SHA1_ACNT   = acnt_hsha1.hexdigest()
+                    acnt_hsha256 = hashlib.sha256()
+                    acnt_hsha256.update( acnt_image )
+                    self.SHA256_ACNT = acnt_hsha256.hexdigest()
+                #except:
+                #    pass
+                #    #print "authenticode_data_ failed"
+                #    #self.write_file ( "/tmp/test-"+self.MD5 , self.Image[off:] )
+                    
 
 class EFI_FV(EFI_MODULE):
     def __init__(self, Offset, Guid, Size, Attributes, HeaderSize, Checksum, ExtHeaderOffset, Image, CalcSum):
@@ -202,7 +707,7 @@ class EFI_FV(EFI_MODULE):
 
     def __str__(self):
         schecksum = ('%04Xh (%04Xh) *** checksum mismatch ***' % (self.Checksum,self.CalcSum)) if self.CalcSum != self.Checksum else ('%04Xh' % self.Checksum)
-        _s = "\n%s%s +%08Xh {%s}: Size %08Xh, Attr %08Xh, HdrSize %04Xh, ExtHdrOffset %08Xh, Checksum %s" % (self.indent,type(self).__name__,self.Offset,self.Guid,self.Size,self.Attributes,self.HeaderSize,self.ExtHeaderOffset,schecksum)
+        _s = "\n%s%s +%08Xh {%s}: Size %08Xh, Attr %08Xh, HdrSize %04Xh, ExtHdrOffset %08Xh, Checksum %s\n" % (self.indent,type(self).__name__,self.Offset,self.Guid,self.Size,self.Attributes,self.HeaderSize,self.ExtHeaderOffset,schecksum)
         _s += super(EFI_FV, self).__str__()
         return _s
 
@@ -216,6 +721,9 @@ class EFI_FILE(EFI_MODULE):
         self.Checksum    = Checksum
         self.UD          = UD
         self.CalcSum     = CalcSum
+        hsha256 = hashlib.sha256()
+        hsha256.update( self.Image )
+        self.SHA256 = hsha256.hexdigest()
 
     def __str__(self):
         schecksum = ('%04Xh (%04Xh) *** checksum mismatch ***' % (self.Checksum,self.CalcSum)) if self.CalcSum != self.Checksum else ('%04Xh' % self.Checksum)
@@ -439,6 +947,51 @@ def search_efi_tree(modules, search_callback, match_module_types=EFIModuleType.S
                 if not findall: return True
 
     return matching_modules
+
+def match_FV_efi_tree(modules, efi_whitelist, match_module_types=EFIModuleType.FILE|EFIModuleType.FV):
+    not_matching_modules = []
+    for m in modules:
+        print "Obj sha: %s"%m.SHA256
+        print "Obj type: %s"%type(m)
+        if ((match_module_types & EFIModuleType.FILE        == EFIModuleType.FILE)        and type(m) == EFI_FILE) or \
+           ((match_module_types & EFIModuleType.FV          == EFIModuleType.FV)          and type(m) == EFI_FV):
+            if (m.SHA256 in efi_whitelist):
+                    print "Found in whitelist"
+                    continue # FV in whitelist, stop check this FV
+            else:
+                # recurse search if current module node has children nodes
+                if len(m.children) > 0:
+                    print "Decode more because EFI_FILE|EFI_FV is not in whitelist and has children"
+                    not_matches = match_FV_efi_tree(m.children, efi_whitelist, match_module_types)
+                    if not_matches:
+                        not_matching_modules.extend(not_matches)
+                else:
+                    if not m.isNVRAM:
+                        print "FV|FILE doesn't have children and not in whitelist"
+                        #r = [];r.append(m.SHA256)
+                        #not_matching_modules.extend(r)
+                    else:
+                        print "This is NVRAM"
+        else:
+            # recurse search if current module node has children nodes
+            if len(m.children) > 0:
+                print "Decode more because type(m) is not (EFI_FILE|EFI_FV) and has children"
+                not_matches = match_FV_efi_tree(m.children, efi_whitelist, match_module_types)
+                if not_matches:
+                    not_matching_modules.extend(not_matches)
+            else:
+               print "Obj without childs"
+               if  (type(m) == EFI_SECTION and m.Type in EFI_SECTIONS_EXE):
+                   if m.SHA256_ACNT:
+                       r = [];r.append(m.SHA256_ACNT)
+                       not_matching_modules.extend(r)
+                   else:
+                       r = [];r.append(m.SHA256)
+                       not_matching_modules.extend(r)
+
+        
+    return not_matching_modules
+
 
 def save_efi_tree(_uefi, modules, parent=None, save_modules=True, path=None, save_log=True, lvl=0):
     mod_dir_path = None
